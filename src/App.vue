@@ -71,7 +71,7 @@ const peerConnections = reactive<Record<string, RTCPeerConnection>>({});
 const joinRoom = async () => {
   if (!nickname.value) return alert('Введите ник!');
   
-  socket.value = io('http://192.168.1.108:3000');
+  socket.value = io(import.meta.env.VITE_WS_URL || 'ws://localhost:3000/ws', {path: '/ws'});
 
   try {
     const stream = await navigator.mediaDevices.getUserMedia({ video: true, audio: true });
