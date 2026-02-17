@@ -103,15 +103,39 @@ const setupSocketListeners = () => {
   if (!socket.value) return;
 
   socket.value.on('users-list', (users: { id: string; nickname: string }[]) => {
+    const myId = socket.value?.id || `fallback_${Date.now()}`;
+    
     users.forEach((user) => {
+      // 🔥 Пропускаем, если соединение уже есть
+      if (peerConnections[user.id]) {
+        console.log(`[WebRTC] Соединение с ${user.nickname} уже существует`);
+        return;
+      }
+      
       peers[user.id] = { nickname: user.nickname };
-      createPeerConnection(user.id, true);
+      
+      // 🔥 Детерминированный выбор инициатора
+      const isInitiator = myId < user.id;
+      console.log(`[WebRTC] Создаю соединение с ${user.nickname}. Инициатор: ${isInitiator}`);
+      
+      createPeerConnection(user.id, isInitiator);
     });
   });
 
   socket.value.on('user-joined', (user: { id: string; nickname: string }) => {
+    // 🔥 Пропускаем дубликаты
+    if (peerConnections[user.id]) {
+      console.log(`[WebRTC] Соединение с ${user.nickname} уже есть, пропускаем`);
+      return;
+    }
+    
+    const myId = socket.value?.id || `fallback_${Date.now()}`;
     peers[user.id] = { nickname: user.nickname };
-    createPeerConnection(user.id, true);
+    
+    const isInitiator = myId < user.id;
+    console.log(`[WebRTC] Новый пользователь ${user.nickname}. Инициатор: ${isInitiator}`);
+    
+    createPeerConnection(user.id, isInitiator);
   });
 
   socket.value.on('user-disconnected', ({ userId }: { userId: string }) => {
