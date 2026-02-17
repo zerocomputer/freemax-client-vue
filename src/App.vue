@@ -60,7 +60,11 @@ const isSharingScreen = ref(false);
 
 // WebRTC Config
 const rtcConfig: RTCConfiguration = {
-  iceServers: [{ urls: 'stun:stun.l.google.com:19302' }],
+  iceServers: [
+    { urls: 'stun:stun.l.google.com:19302' },
+    { urls: 'stun:stun1.l.google.com:19302' },
+    { urls: 'turn:turn.zerocomputer.ru:3478', username: 'test', credential: 'test' }
+  ],
 };
 
 // PeerConnections
