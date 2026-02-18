@@ -95,6 +95,7 @@ const nickname = ref('');
 const roomId = ref<string | null>(null);
 const shareLink = ref('');
 const deviceInfo = ref('');
+const turnConfig = ref<{ username: string; password: string } | null>(null);
 
 const logs = reactive<{type: string, msg: string}[]>([]);
 const addLog = (msg: string, type: 'info' | 'error' | 'success' = 'info') => {
@@ -117,11 +118,26 @@ const isSharingScreen = ref(false);
 const hasCamera = ref(false);
 
 // WebRTC Config
-const rtcConfig: RTCConfiguration = { 
-  iceServers: [
-    { urls: 'stun:stun.l.google.com:19302' },
-    { urls: 'stun:stun1.l.google.com:19302' },
-  ],
+const getRtcConfig = () => {
+  const config: RTCConfiguration = { 
+    iceServers: [
+      { urls: 'stun:stun.l.google.com:19302' },
+      { urls: 'stun:stun1.l.google.com:19302' },
+    ],
+  };
+
+  // 🔥 Добавляем TURN сервер только если получили креды
+  if (turnConfig.value) {
+    config.iceServers!.push({
+      // Замените на адрес ВАШЕГО сервера
+      urls: 'turn:ВАШ_IP_СЕРВЕРА:3478', 
+      username: turnConfig.value.username,
+      credential: turnConfig.value.password,
+    });
+    addLog('✅ TURN сервер настроен с уникальными кредами', 'success');
+  }
+  
+  return config;
 };
 
 const peerConnections = reactive<Record<string, RTCPeerConnection>>({});
@@ -380,16 +396,22 @@ const setupSocketListeners = () => {
   if (!socket.value) return;
   addLog('Настройка слушателей сокетов...', 'info');
 
-  socket.value.on('users-list', (users: { id: string; nickname: string }[]) => {
+  socket.value.on('users-list', (data: any) => {
+    // 🔥 FIX: Поддержка нового формата ответа (объект с users и turnConfig)
+    const users = Array.isArray(data) ? data : data.users;
+    
+    if (data.turnConfig) {
+      turnConfig.value = data.turnConfig;
+      addLog('🔐 Получены TURN креды от сервера', 'success');
+    }
+
     addLog(`Получен список пользователей: ${users.length}`, 'info');
     const myId = socket.value?.id || `fallback_${Date.now()}`;
     
-    users.forEach((user) => {
+    users.forEach((user: any) => {
       if (peerConnections[user.id]) return;
-      
       peers[user.id] = { nickname: user.nickname };
       const isInitiator = myId < user.id;
-      addLog(`Создаем соединение с ${user.nickname} (Initiator: ${isInitiator})`, 'info');
       createPeerConnection(user.id, isInitiator);
     });
   });
@@ -453,17 +475,22 @@ const setupSocketListeners = () => {
 
 const createPeerConnection = (targetId: string, isInitiator: boolean) => {
   addLog(`Creating PeerConnection for ${targetId}...`, 'info');
-  const pc = new RTCPeerConnection(rtcConfig);
+  
+  // 🔥 FIX: Используем функцию для получения актуального конфига с TURN
+  const pc = new RTCPeerConnection(getRtcConfig());
   peerConnections[targetId] = pc;
 
-  // 🔥 FIX: Добавляем ТОЛЬКО существующие треки из localStream
+  // 🔥 FIX: Логирование ICE состояний для отладки
+  pc.oniceconnectionstatechange = () => {
+    addLog(`ICE State (${targetId}): ${pc.iceConnectionState}`, 
+      pc.iceConnectionState === 'failed' ? 'error' : 'info');
+  };
+
   if (localStream.value) {
     localStream.value.getTracks().forEach((track) => {
       pc.addTrack(track, localStream.value!);
       addLog(`Track ${track.kind} added to PC`, 'info');
     });
-  } else {
-    addLog('⚠️ localStream is null, no tracks added to PC', 'error');
   }
 
   pc.ontrack = (event) => {
@@ -475,7 +502,6 @@ const createPeerConnection = (targetId: string, isInitiator: boolean) => {
 
   pc.onicecandidate = (event) => {
     if (event.candidate) {
-      addLog('Sending ICE candidate...', 'info');
       socket.value?.emit('signal', {
         targetId,
         type: 'ice-candidate',
@@ -484,23 +510,15 @@ const createPeerConnection = (targetId: string, isInitiator: boolean) => {
     }
   };
 
-  pc.onconnectionstatechange = () => {
-    addLog(`Connection State with ${targetId}: ${pc.connectionState}`, 'info');
-  };
-
   if (isInitiator) {
     pc.createOffer()
-      .then((offer) => {
-        addLog('Offer created', 'info');
-        return pc.setLocalDescription(offer);
-      })
+      .then((offer) => pc.setLocalDescription(offer))
       .then(() => {
         socket.value?.emit('signal', {
           targetId,
           type: 'offer',
           sdp: pc.localDescription,
         });
-        addLog('Offer sent via socket', 'info');
       })
       .catch(err => addLog(`Error creating offer: ${err.message}`, 'error'));
   }
@@ -538,30 +556,42 @@ const toggleAudio = () => {
   }
 };
 
+// В функции shareScreen
 const shareScreen = async () => {
-  if (!localStream.value) {
-    addLog('⚠️ localStream не инициализирован для демонстрации', 'error');
-    return;
-  }
+  if (!localStream.value) return;
+
   try {
     if (!isSharingScreen.value) {
-      const screenStream = await navigator.mediaDevices.getDisplayMedia({ video: true });
+      // 1. Получаем только ВИДЕО с экрана
+      const screenStream = await navigator.mediaDevices.getDisplayMedia({ 
+        video: true, 
+        audio: false // ❗ Не захватываем аудио системы, чтобы не было эха
+      });
+      
       const screenTrack = screenStream.getVideoTracks()[0];
       if (!screenTrack) return;
 
-      if (localVideoRef.value) localVideoRef.value.srcObject = screenStream;
+      // 2. Показываем превью (объединяем аудио камеры + видео экрана)
+      const audioTrack = localStream.value.getAudioTracks()[0];
+      const combinedStream = new MediaStream([screenTrack, ...(audioTrack ? [audioTrack] : [])]);
+      
+      if (localVideoRef.value) {
+        localVideoRef.value.srcObject = combinedStream;
+      }
 
+      // 3. Заменяем трек во всех соединениях
       Object.values(peerConnections).forEach(pc => {
         const sender = pc.getSenders().find(s => s.track?.kind === 'video');
-        if (sender && sender.track) {
+        if (sender) {
           sender.replaceTrack(screenTrack);
-          addLog('Screen track replaced video track', 'info');
         }
       });
 
+      // 4. Обработка остановки (крестик в браузере)
       screenTrack.onended = () => stopScreenShare();
+      
       isSharingScreen.value = true;
-      localStream.value = screenStream;
+      // ❗ НЕ заменяем localStream.value полностью, иначе потеряем контекст аудио
     } else {
       stopScreenShare();
     }
@@ -570,24 +600,24 @@ const shareScreen = async () => {
   }
 };
 
+// В функции stopScreenShare
 const stopScreenShare = async () => {
-  const streamToRestore = cameraStream.value || localStream.value;
-  if (!streamToRestore) return;
+  if (!cameraStream.value && !localStream.value) return;
   
-  const camTrack = streamToRestore.getVideoTracks()[0];
+  // Возвращаем трек камеры
+  const camTrack = cameraStream.value?.getVideoTracks()[0] || null;
   
-  if (localVideoRef.value) localVideoRef.value.srcObject = streamToRestore;
-
   Object.values(peerConnections).forEach(pc => {
     const sender = pc.getSenders().find(s => s.track?.kind === 'video');
-    if (sender) sender.replaceTrack(camTrack || null);
+    if (sender) sender.replaceTrack(camTrack);
   });
 
-  localStream.value = streamToRestore;
+  if (localVideoRef.value) {
+    localVideoRef.value.srcObject = localStream.value;
+  }
+  
   isSharingScreen.value = false;
-  addLog('Screen sharing stopped', 'info');
 };
-
 onUnmounted(() => {
   leaveRoom();
 });
