@@ -533,7 +533,8 @@ const toggleVideo = async () => {
   if (!localStream.value) return;
   
   if (!hasCamera.value) {
-    await enableCamera();
+    if (!isVideoOn.value) await enableCamera();
+    else await disableCamera();
     return;
   }
   
