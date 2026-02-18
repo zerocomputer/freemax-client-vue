@@ -27,7 +27,6 @@
         <button @click="copyLink">Копировать</button>
       </div>
       
-      <!-- 🔥 Инфо о устройствах -->
       <div v-if="deviceInfo" class="device-info">
         {{ deviceInfo }}
       </div>
@@ -38,13 +37,15 @@
       <div class="status-bar">
         <span>Вы: {{ nickname }} | Room: {{ roomId }} | Socket: {{ socket?.id || '---' }}</span>
         <div class="controls">
-          <button @click="toggleVideo" :disabled="!hasCamera">
+          <!-- 🔥 FIX: Кнопка видео теперь работает даже если камеры не было изначально -->
+          <button @click="toggleVideo">
             {{ hasCamera && isVideoOn ? '📹 Выкл. камеру' : '📷 Вкл. камеру' }}
           </button>
           <button @click="toggleAudio">
             {{ isAudioOn ? '🎤 Выкл. звук' : '🎙️ Вкл. звук' }}
           </button>
-          <button @click="shareScreen" :disabled="!hasCamera">
+          <!-- 🔥 FIX: Убрали disabled="!hasCamera" для демонстрации экрана -->
+          <button @click="shareScreen">
             {{ isSharingScreen ? '🖥 Остановить экран' : '🖥 Показать экран' }}
           </button>
           <button @click="leaveRoom" class="danger">Покинуть</button>
@@ -52,7 +53,6 @@
       </div>
 
       <div class="grid">
-        <!-- Локальное видео -->
         <div class="video-card local">
           <video ref="localVideoRef" autoplay muted playsinline></video>
           <div class="label">
@@ -60,7 +60,6 @@
           </div>
         </div>
 
-        <!-- Удаленные видео -->
         <div v-for="(stream, userId) in remoteStreams" :key="userId" class="video-card remote">
           <video :srcObject="stream" autoplay playsinline></video>
           <div class="label">{{ peers[userId]?.nickname || userId }}</div>
@@ -71,12 +70,11 @@
         Подключено: {{ Object.keys(peers).length + 1 }}
       </div>
       
-      <!-- 🔥 Статус камеры -->
       <div v-if="!hasCamera" class="camera-warning">
         ⚠️ Камера не найдена. Работаем только со звуком.
       </div>
 
-      <!-- 🔥 Консоль логов внутри интерфейса для наглядности -->
+      <!-- Логирование в интерфейсе -->
       <div class="debug-console">
         <h4>🛠 Системный лог:</h4>
         <ul>
@@ -98,12 +96,11 @@ const roomId = ref<string | null>(null);
 const shareLink = ref('');
 const deviceInfo = ref('');
 
-// Для отображения логов в интерфейсе
 const logs = reactive<{type: string, msg: string}[]>([]);
 const addLog = (msg: string, type: 'info' | 'error' | 'success' = 'info') => {
   const timestamp = new Date().toLocaleTimeString();
   logs.unshift({ type, msg: `[${timestamp}] ${msg}` });
-  if (logs.length > 20) logs.pop(); // Храним последние 20
+  if (logs.length > 20) logs.pop();
   console.log(`[${type.toUpperCase()}] ${msg}`);
 };
 
@@ -113,7 +110,7 @@ const peers = reactive<Record<string, { nickname: string }>>({});
 
 // Media State
 const localStream = ref<MediaStream | null>(null);
-const cameraStream = ref<MediaStream | null>(null); // Только видеотрек
+const cameraStream = ref<MediaStream | null>(null);
 const isVideoOn = ref(false);
 const isAudioOn = ref(true);
 const isSharingScreen = ref(false);
@@ -127,7 +124,6 @@ const rtcConfig: RTCConfiguration = {
   ],
 };
 
-// PeerConnections
 const peerConnections = reactive<Record<string, RTCPeerConnection>>({});
 
 // --- Lifecycle ---
@@ -148,7 +144,6 @@ const generateLink = (room: string) => {
   return url.toString();
 };
 
-// 🔥 Проверка доступных устройств
 const checkAvailableDevices = async () => {
   addLog('Проверка доступных устройств...', 'info');
   try {
@@ -167,7 +162,6 @@ const checkAvailableDevices = async () => {
   }
 };
 
-// 🔥 Инициализация ТОЛЬКО аудио при входе
 const initAudioOnly = async () => {
   addLog('Запрос доступа к микрофону...', 'info');
   try {
@@ -196,7 +190,6 @@ const initAudioOnly = async () => {
   }
 };
 
-// 🔥 Запрос камеры
 const enableCamera = async () => {
   addLog('Запрос доступа к камере...', 'info');
   try {
@@ -218,10 +211,10 @@ const enableCamera = async () => {
       localVideoRef.value.srcObject = localStream.value;
     }
     
-    // 🔥 Добавляем трек во все существующие peer connections
+    // 🔥 FIX: Добавляем видеотрек во ВСЕ существующие peer connections
     Object.values(peerConnections).forEach(pc => {
       pc.addTrack(videoTrack, localStream.value!);
-      addLog(`Видеотрек добавлен в соединение с `, 'info');
+      addLog(`Видеотрек добавлен в соединение`, 'info');
     });
     
     hasCamera.value = true;
@@ -236,13 +229,25 @@ const enableCamera = async () => {
   }
 };
 
-const disableCamera = () => {
-  const videoTrack = localStream.value?.getVideoTracks()[0];
-  if (videoTrack) {
-    videoTrack.enabled = false;
-    isVideoOn.value = false;
-    addLog('Камера выключена (трек отключен)', 'info');
+// 🔥 FIX: Общая функция для старта медиа (используется и в create, и в join)
+const startMediaFlow = async () => {
+  const devices = await checkAvailableDevices();
+  if (!devices.hasAudio && !devices.hasVideo) {
+    alert('❌ Не найдено ни микрофона, ни камеры.');
+    return;
   }
+
+  const audioOk = await initAudioOnly();
+  if (!audioOk) return;
+
+  if (devices.hasVideo) {
+    const useCamera = confirm('📷 Найдена камера. Включить видео?');
+    if (useCamera) await enableCamera();
+  }
+
+  setupSocketListeners();
+  socket.value?.emit('join', { nickname: nickname.value, roomId: roomId.value });
+  addLog('Отправлен запрос на вход в комнату (join)', 'info');
 };
 
 // --- Room Functions ---
@@ -262,35 +267,9 @@ const createRoom = async () => {
     url.searchParams.set('room', response.roomId);
     window.history.pushState({}, '', url.toString());
 
-    // 🔥 ВАЖНО: Инициализируем медиа сразу после создания комнаты
+    // 🔥 FIX: ВАЖНО! Запускаем медиа-поток после создания комнаты
     startMediaFlow();
   });
-};
-
-// 🔥 Общая функция для старта медиа и сокетов (используется и в create, и в join)
-const startMediaFlow = async () => {
-  // 1. Проверяем устройства
-  const devices = await checkAvailableDevices();
-  if (!devices.hasAudio && !devices.hasVideo) {
-    alert('❌ Не найдено ни микрофона, ни камеры.');
-    return;
-  }
-
-  // 2. Инициализируем аудио
-  const audioOk = await initAudioOnly();
-  if (!audioOk) return;
-
-  // 3. Если есть камера — спрашиваем (или включаем сразу, если нужно)
-  if (devices.hasVideo) {
-    // Для создателя комнаты можно включить сразу или спросить
-    const useCamera = confirm('📷 Найдена камера. Включить видео?');
-    if (useCamera) await enableCamera();
-  }
-
-  // 4. Подключаем слушатели сокетов и вступаем
-  setupSocketListeners();
-  socket.value?.emit('join', { nickname: nickname.value, roomId: roomId.value });
-  addLog('Отправлен запрос на вход в комнату (join)', 'info');
 };
 
 const resetRoom = () => {
@@ -348,7 +327,7 @@ const leaveRoom = () => {
   
   Object.values(peerConnections).forEach(pc => {
     pc.close();
-    addLog(`PeerConnection закрыт: `, 'info');
+    addLog(`PeerConnection закрыт`, 'info');
   });
   
   Object.keys(peerConnections).forEach(key => delete peerConnections[key]);
@@ -477,7 +456,7 @@ const createPeerConnection = (targetId: string, isInitiator: boolean) => {
   const pc = new RTCPeerConnection(rtcConfig);
   peerConnections[targetId] = pc;
 
-  // 🔥 Добавляем только существующие треки
+  // 🔥 FIX: Добавляем ТОЛЬКО существующие треки из localStream
   if (localStream.value) {
     localStream.value.getTracks().forEach((track) => {
       pc.addTrack(track, localStream.value!);
@@ -530,11 +509,14 @@ const createPeerConnection = (targetId: string, isInitiator: boolean) => {
 // --- Media Controls ---
 
 const toggleVideo = async () => {
-  if (!localStream.value) return;
+  if (!localStream.value) {
+    addLog('⚠️ localStream не инициализирован', 'error');
+    return;
+  }
   
+  // 🔥 FIX: Если камеры ещё нет — пытаемся включить
   if (!hasCamera.value) {
-    if (!isVideoOn.value) await enableCamera();
-    else await disableCamera();
+    await enableCamera();
     return;
   }
   
@@ -557,7 +539,10 @@ const toggleAudio = () => {
 };
 
 const shareScreen = async () => {
-  if (!localStream.value) return;
+  if (!localStream.value) {
+    addLog('⚠️ localStream не инициализирован для демонстрации', 'error');
+    return;
+  }
   try {
     if (!isSharingScreen.value) {
       const screenStream = await navigator.mediaDevices.getDisplayMedia({ video: true });
@@ -632,7 +617,6 @@ button.danger { background: #ffdddd; border: 1px solid #ffaaaa; color: #cc0000; 
 .device-info { margin-top: 15px; padding: 10px; background: #e3f2fd; border-radius: 8px; font-size: 14px; }
 .camera-warning { padding: 10px; background: #fff3cd; border: 1px solid #ffc107; border-radius: 8px; color: #856404; }
 
-/* 🔥 Стили для лога */
 .debug-console {
   margin-top: 20px;
   text-align: left;
