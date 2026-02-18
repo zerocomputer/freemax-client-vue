@@ -54,14 +54,14 @@
 
       <div class="grid">
         <div class="video-card local">
-          <video ref="localVideoRef" autoplay muted playsinline></video>
+          <video ref="localVideoRef" autoplay controls="true" muted playsinline></video>
           <div class="label">
             Вы {{ !hasCamera ? '(без камеры)' : '' }} {{ !isAudioOn ? '(молчит)' : '' }}
           </div>
         </div>
 
         <div v-for="(stream, userId) in remoteStreams" :key="userId" class="video-card remote">
-          <video :srcObject="stream" autoplay playsinline></video>
+          <video :srcObject="stream" autoplay controls="true" playsinline></video>
           <div class="label">{{ peers[userId]?.nickname || userId }}</div>
         </div>
       </div>
