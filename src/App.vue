@@ -7,6 +7,7 @@
       <div v-if="!roomId" class="create-mode">
         <input v-model="nickname" placeholder="Введите ваш ник" />
         <button @click="createRoom">🏠 Создать комнату</button>
+        <button @click="testDevices" style="margin-top: 10px; background: #eee;">🧪 Проверка устройств</button>
         <div class="divider">или</div>
         <p class="hint">Если у вас есть ссылка, просто откройте её</p>
       </div>
@@ -17,7 +18,7 @@
         <button @click="joinRoom">🚪 Войти в конференцию</button>
         <button @click="copyLink" class="secondary">🔗 Копировать ссылку</button>
         <button @click="resetRoom" class="danger">✖ Отмена</button>
-        <button @click="testMediaAccess" class="secondary">🧪 Тест медиа</button>
+        <button @click="testDevices" style="margin-top: 10px; background: #eee;">🧪 Проверка устройств</button>
       </div>
       
       <div v-if="shareLink" class="share-block">
@@ -171,11 +172,48 @@ const joinRoom = async () => {
 
   initSocket();
 
-  try {
-    const stream = await navigator.mediaDevices.getUserMedia({
-      video: { width: { ideal: 1280 }, height: { ideal: 720 }, facingMode: 'user' },
-      audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true }
-    });
+    try {
+    // 3. ПОШАГОВЫЙ ЗАПРОС для диагностики
+    // Сначала пробуем получить всё вместе
+    let stream: MediaStream;
+    try {
+      stream = await navigator.mediaDevices.getUserMedia({ 
+        video: { width: { ideal: 1280 }, height: { ideal: 720 } }, 
+        audio: { echoCancellation: true, noiseSuppression: true } 
+      });
+    } catch (e: any) {
+      // Если не вышло, пробуем раздельно, чтобы найти виновника
+      console.warn('Общий запрос не удался, пробуем раздельно...', e);
+      
+      let videoStream: MediaStream | null = null;
+      let audioStream: MediaStream | null = null;
+
+      try {
+        videoStream = await navigator.mediaDevices.getUserMedia({ video: true });
+      } catch (ve: any) {
+        console.error('Видео не найдено:', ve.name);
+      }
+
+      try {
+        audioStream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      } catch (ae: any) {
+        console.error('Аудио не найдено:', ae.name);
+      }
+
+      if (!videoStream && !audioStream) {
+        throw new Error('Не найдено ни видео, ни аудио устройств');
+      }
+
+      // Объединяем треки в один поток
+      const tracks = [
+        ...(videoStream ? videoStream.getTracks() : []),
+        ...(audioStream ? audioStream.getTracks() : [])
+      ];
+      stream = new MediaStream(tracks);
+      
+      if (!videoStream) alert('⚠️ Камера не найдена, работаем только со звуком.');
+      if (!audioStream) alert('⚠️ Микрофон не найден, работаем без звука.');
+    }
 
     localStream.value = stream;
     cameraStream.value = stream;
@@ -183,19 +221,40 @@ const joinRoom = async () => {
     if (localVideoRef.value) {
       localVideoRef.value.srcObject = stream;
     }
+
   } catch (err: any) {
-    console.error('Ошибка доступа к медиа:', err);
-    if (err.name === 'NotAllowedError' || err.name === 'PermissionDeniedError') {
-      alert('❌ Доступ к камере/микрофону запрещен. Проверьте настройки браузера и ОС.');
-    } else {
-      alert('⚠️ Не удалось получить доступ к камере/микрофону: ' + err.message);
-    }
+    console.error('Критическая ошибка медиа:', err);
+    handleMediaError(err);
     return;
   }
 
   setupSocketListeners();
   // Отправляем ID комнаты при входе
   socket.value?.emit('join', { nickname: nickname.value, roomId: roomId.value });
+};
+
+// Обработчик специфичных ошибок
+const handleMediaError = (err: any) => {
+  let message = '⚠️ Ошибка доступа к устройствам.\n\n';
+  
+  if (err.name === 'NotFoundError' || err.message.includes('not found')) {
+    message += '❌ Ошибка: NotFoundError\n\n';
+    message += 'Система не видит камеру или микрофон.\n';
+    message += '1. Проверьте, не занято ли устройство другим приложением (Zoom, Skype, Discord).\n';
+    message += '2. Если это MacBook: проверьте, не закрыта ли крышка (для внешней камеры).\n';
+    message += '3. Перезагрузите браузер.';
+  } else if (err.name === 'NotAllowedError' || err.name === 'PermissionDeniedError') {
+    message += '❌ Ошибка: Доступ запрещен.\n\n';
+    message += '1. Нажмите на замок 🔒 в адресной строке и разрешите доступ.\n';
+    message += '2. macOS: Системные настройки → Защита и безопасность → Конфиденциальность → Камера/Микрофон.';
+  } else if (err.name === 'NotReadableError') {
+    message += '❌ Ошибка: Устройство занято.\n\n';
+    message += 'Другая программа монополизировала камеру. Закройте её.';
+  } else {
+    message += `⚠️ ${err.name}: ${err.message}`;
+  }
+  
+  alert(message);
 };
 
 const leaveRoom = () => {
@@ -219,13 +278,27 @@ const leaveRoom = () => {
   }
 };
 
-const testMediaAccess = async () => {
+// В секцию methods
+const testDevices = async () => {
   try {
+    // Запрос списка устройств (требует хотя бы разового разрешения)
+    const devices = await navigator.mediaDevices.enumerateDevices();
+    const videoInputs = devices.filter(d => d.kind === 'videoinput');
+    const audioInputs = devices.filter(d => d.kind === 'audioinput');
+    
+    let info = `📹 Видео: ${videoInputs.length}\n🎤 Аудио: ${audioInputs.length}\n\n`;
+    
+    if (videoInputs.length === 0) info += '⚠️ Камеры не найдены системой!\n';
+    if (audioInputs.length === 0) info += '⚠️ Микрофоны не найдены системой!\n';
+    
+    // Пробуем захватить
     const stream = await navigator.mediaDevices.getUserMedia({ video: true, audio: true });
-    alert('✅ Доступ разрешен! Камера и микрофон работают.');
-    stream.getTracks().forEach(track => track.stop());
-  } catch (err: any) {
-    alert('❌ Ошибка: ' + err.name + ' - ' + err.message);
+    info += '✅ Устройства работают корректно!';
+    stream.getTracks().forEach(t => t.stop());
+    
+    alert(info);
+  } catch (e: any) {
+    alert(`❌ Тест не пройден: ${e.name}\n${e.message}`);
   }
 };
 
