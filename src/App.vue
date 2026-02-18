@@ -1,7 +1,7 @@
 <template>
   <div class="container">
     <h1>Freemax Video</h1>
-
+    
     <!-- Экран входа / Создания комнаты -->
     <div v-if="!socket" class="login-screen">
       <div v-if="!roomId" class="create-mode">
@@ -20,11 +20,16 @@
         <button @click="resetRoom" class="danger">✖ Отмена</button>
         <button @click="testDevices" style="margin-top: 10px; background: #eee;">🧪 Проверка устройств</button>
       </div>
-      
+    
       <div v-if="shareLink" class="share-block">
         <p>Отправьте эту ссылку собеседнику:</p>
         <input :value="shareLink" readonly @click="copyLink" />
         <button @click="copyLink">Копировать</button>
+      </div>
+      
+      <!-- 🔥 Инфо о устройствах -->
+      <div v-if="deviceInfo" class="device-info">
+        {{ deviceInfo }}
       </div>
     </div>
 
@@ -33,9 +38,16 @@
       <div class="status-bar">
         <span>Вы: {{ nickname }} | Room: {{ roomId }}</span>
         <div class="controls">
-          <button @click="toggleVideo">{{ isVideoOn ? '📹 Выкл. камеру' : '📷 Вкл. камеру' }}</button>
-          <button @click="toggleAudio">{{ isAudioOn ? '🎤 Выкл. звук' : '🎙️ Вкл. звук' }}</button>
-          <button @click="shareScreen">{{ isSharingScreen ? '🖥 Остановить экран' : '🖥 Показать экран' }}</button>
+          <!-- 🔥 Кнопка теперь включает/выключает камеру по запросу -->
+          <button @click="toggleVideo" :disabled="!hasCamera">
+            {{ hasCamera && isVideoOn ? '📹 Выкл. камеру' : '📷 Вкл. камеру' }}
+          </button>
+          <button @click="toggleAudio">
+            {{ isAudioOn ? '🎤 Выкл. звук' : '🎙️ Вкл. звук' }}
+          </button>
+          <button @click="shareScreen" :disabled="!hasCamera">
+            {{ isSharingScreen ? '🖥 Остановить экран' : '🖥 Показать экран' }}
+          </button>
           <button @click="leaveRoom" class="danger">Покинуть</button>
         </div>
       </div>
@@ -44,7 +56,9 @@
         <!-- Локальное видео -->
         <div class="video-card local">
           <video ref="localVideoRef" autoplay muted playsinline></video>
-          <div class="label">Вы</div>
+          <div class="label">
+            Вы {{ !hasCamera ? '(без камеры)' : '' }}
+          </div>
         </div>
 
         <!-- Удаленные видео -->
@@ -53,9 +67,14 @@
           <div class="label">{{ peers[userId]?.nickname || userId }}</div>
         </div>
       </div>
-      
+    
       <div class="peers-list">
         Подключено: {{ Object.keys(peers).length + 1 }}
+      </div>
+      
+      <!-- 🔥 Статус камеры -->
+      <div v-if="!hasCamera" class="camera-warning">
+        ⚠️ Камера не найдена. Работаем только со звуком.
       </div>
     </div>
   </div>
@@ -70,6 +89,7 @@ const socket = ref<Socket | null>(null);
 const nickname = ref('');
 const roomId = ref<string | null>(null);
 const shareLink = ref('');
+const deviceInfo = ref('');
 
 const localVideoRef = ref<HTMLVideoElement | null>(null);
 const remoteStreams = reactive<Record<string, MediaStream>>({});
@@ -77,17 +97,17 @@ const peers = reactive<Record<string, { nickname: string }>>({});
 
 // Media State
 const localStream = ref<MediaStream | null>(null);
-const cameraStream = ref<MediaStream | null>(null);
-const isVideoOn = ref(true);
+const cameraStream = ref<MediaStream | null>(null); // Только видеотрек
+const isVideoOn = ref(false); // 🔥 По умолчанию видео ВЫКЛЮЧЕНО
 const isAudioOn = ref(true);
 const isSharingScreen = ref(false);
+const hasCamera = ref(false); // 🔥 Флаг наличия камеры
 
 // WebRTC Config
-const rtcConfig: RTCConfiguration = {
+const rtcConfig: RTCConfiguration = { 
   iceServers: [
     { urls: 'stun:stun.l.google.com:19302' },
     { urls: 'stun:stun1.l.google.com:19302' },
-    // Добавьте свои TURN сервера при деплое
   ],
 };
 
@@ -96,7 +116,6 @@ const peerConnections = reactive<Record<string, RTCPeerConnection>>({});
 
 // --- Lifecycle ---
 onMounted(() => {
-  // Проверяем URL на наличие параметра room
   const urlParams = new URLSearchParams(window.location.search);
   const roomFromUrl = urlParams.get('room');
   if (roomFromUrl) {
@@ -104,7 +123,7 @@ onMounted(() => {
   }
 });
 
-// --- Methods ---
+// --- Helper Functions ---
 
 const generateLink = (room: string) => {
   const url = new URL(window.location.href);
@@ -112,17 +131,125 @@ const generateLink = (room: string) => {
   return url.toString();
 };
 
+// 🔥 Проверка доступных устройств
+const checkAvailableDevices = async () => {
+  try {
+    const devices = await navigator.mediaDevices.enumerateDevices();
+    const videoInputs = devices.filter(d => d.kind === 'videoinput');
+    const audioInputs = devices.filter(d => d.kind === 'audioinput');
+    
+    hasCamera.value = videoInputs.length > 0;
+    deviceInfo.value = `📹 Камер: ${videoInputs.length} | 🎤 Микрофонов: ${audioInputs.length}`;
+    
+    return { hasVideo: videoInputs.length > 0, hasAudio: audioInputs.length > 0 };
+  } catch (e: any) {
+    console.error('Device check failed:', e);
+    deviceInfo.value = '⚠️ Не удалось проверить устройства';
+    return { hasVideo: false, hasAudio: false };
+  }
+};
+
+// 🔥 Инициализация ТОЛЬКО аудио при входе
+const initAudioOnly = async () => {
+  try {
+    const stream = await navigator.mediaDevices.getUserMedia({ 
+      audio: { 
+        echoCancellation: true, 
+        noiseSuppression: true,
+        autoGainControl: true
+      } 
+    });
+    
+    localStream.value = stream;
+    isAudioOn.value = true;
+    
+    // Пустой видео-превью (черный экран)
+    if (localVideoRef.value) {
+      localVideoRef.value.srcObject = stream;
+    }
+    
+    return true;
+  } catch (err: any) {
+    console.error('Audio init failed:', err);
+    alert(`❌ Не удалось получить доступ к микрофону: ${err.name}`);
+    return false;
+  }
+};
+
+// 🔥 Запрос камеры (опционально, по желанию пользователя)
+const enableCamera = async () => {
+  try {
+    const videoStream = await navigator.mediaDevices.getUserMedia({ 
+      video: { 
+        width: { ideal: 1280 }, 
+        height: { ideal: 720 },
+        facingMode: 'user'
+      } 
+    });
+    
+    const videoTrack = videoStream.getVideoTracks()[0];
+    if (!videoTrack) {
+      videoStream.getTracks().forEach(t => t.stop());
+      throw new Error('No video track');
+    }
+    
+    // Сохраняем видеотрек
+    cameraStream.value = videoStream;
+    
+    // Добавляем видеотрек к локальному стриму
+    localStream.value?.addTrack(videoTrack);
+    
+    // Обновляем превью
+    if (localVideoRef.value) {
+      localVideoRef.value.srcObject = localStream.value;
+    }
+    
+    // 🔥 Добавляем трек во все существующие peer connections
+    Object.values(peerConnections).forEach(pc => {
+      pc.addTrack(videoTrack, localStream.value!);
+    });
+    
+    hasCamera.value = true;
+    isVideoOn.value = true;
+    
+    console.log('✅ Камера включена');
+    return true;
+  } catch (err: any) {
+    console.error('Camera enable failed:', err);
+    
+    if (err.name === 'NotFoundError') {
+      alert('❌ Камера не найдена на этом устройстве.\n\nБудем работать только со звуком.');
+    } else if (err.name === 'NotAllowedError') {
+      alert('❌ Доступ к камере запрещен.\n\nПроверьте настройки браузера и macOS.');
+    } else {
+      alert(`⚠️ Не удалось включить камеру: ${err.name}`);
+    }
+    
+    hasCamera.value = false;
+    isVideoOn.value = false;
+    return false;
+  }
+};
+
+// 🔥 Выключение камеры (не запрашиваем заново, просто отключаем трек)
+const disableCamera = () => {
+  const videoTrack = localStream.value?.getVideoTracks()[0];
+  if (videoTrack) {
+    videoTrack.enabled = false;
+    isVideoOn.value = false;
+  }
+};
+
+// --- Room Functions ---
+
 const createRoom = async () => {
   if (!nickname.value) return alert('Введите ник!');
   
-  // Инициализируем сокет заранее для создания комнаты
   initSocket();
   
-  // Запрашиваем создание комнаты на сервере
   socket.value?.emit('create-room', {}, (response: { roomId: string }) => {
     roomId.value = response.roomId;
     shareLink.value = generateLink(response.roomId);
-    // Обновляем URL браузера без перезагрузки
     const url = new URL(window.location.href);
     url.searchParams.set('room', response.roomId);
     window.history.pushState({}, '', url.toString());
@@ -158,103 +285,29 @@ const joinRoom = async () => {
   if (!nickname.value) return alert('Введите ник!');
   if (!roomId.value) return alert('Нет ID комнаты!');
 
-  // 1. Проверка поддержки API браузером
-  if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
-    alert('Ваш браузер не поддерживает доступ к камере и микрофону.');
+  // 🔥 1. Проверяем какие устройства доступны
+  const devices = await checkAvailableDevices();
+  
+  if (!devices.hasAudio && !devices.hasVideo) {
+    alert('❌ Не найдено ни микрофона, ни камеры.\n\nПроверьте подключения устройств.');
     return;
   }
 
-  // 2. Проверка HTTPS
-  if (location.protocol !== 'https:' && location.hostname !== 'localhost' && location.hostname !== '127.0.0.1') {
-    alert('Для доступа к камере требуется HTTPS соединение или localhost.');
-    return;
+  // 🔥 2. Инициализируем ТОЛЬКО аудио
+  const audioOk = await initAudioOnly();
+  if (!audioOk) return;
+
+  // 🔥 3. Если есть камера — спрашиваем пользователя
+  if (devices.hasVideo) {
+    const useCamera = confirm('📷 Найдена камера. Хотите включить видео?');
+    if (useCamera) {
+      await enableCamera();
+    }
   }
 
   initSocket();
-
-    try {
-    // 3. ПОШАГОВЫЙ ЗАПРОС для диагностики
-    // Сначала пробуем получить всё вместе
-    let stream: MediaStream;
-    try {
-      stream = await navigator.mediaDevices.getUserMedia({ 
-        video: { width: { ideal: 1280 }, height: { ideal: 720 } }, 
-        audio: { echoCancellation: true, noiseSuppression: true } 
-      });
-    } catch (e: any) {
-      // Если не вышло, пробуем раздельно, чтобы найти виновника
-      console.warn('Общий запрос не удался, пробуем раздельно...', e);
-      
-      let videoStream: MediaStream | null = null;
-      let audioStream: MediaStream | null = null;
-
-      try {
-        videoStream = await navigator.mediaDevices.getUserMedia({ video: true });
-      } catch (ve: any) {
-        console.error('Видео не найдено:', ve.name);
-      }
-
-      try {
-        audioStream = await navigator.mediaDevices.getUserMedia({ audio: true });
-      } catch (ae: any) {
-        console.error('Аудио не найдено:', ae.name);
-      }
-
-      if (!videoStream && !audioStream) {
-        throw new Error('Не найдено ни видео, ни аудио устройств');
-      }
-
-      // Объединяем треки в один поток
-      const tracks = [
-        ...(videoStream ? videoStream.getTracks() : []),
-        ...(audioStream ? audioStream.getTracks() : [])
-      ];
-      stream = new MediaStream(tracks);
-      
-      if (!videoStream) alert('⚠️ Камера не найдена, работаем только со звуком.');
-      if (!audioStream) alert('⚠️ Микрофон не найден, работаем без звука.');
-    }
-
-    localStream.value = stream;
-    cameraStream.value = stream;
-    
-    if (localVideoRef.value) {
-      localVideoRef.value.srcObject = stream;
-    }
-
-  } catch (err: any) {
-    console.error('Критическая ошибка медиа:', err);
-    handleMediaError(err);
-    return;
-  }
-
   setupSocketListeners();
-  // Отправляем ID комнаты при входе
   socket.value?.emit('join', { nickname: nickname.value, roomId: roomId.value });
-};
-
-// Обработчик специфичных ошибок
-const handleMediaError = (err: any) => {
-  let message = '⚠️ Ошибка доступа к устройствам.\n\n';
-  
-  if (err.name === 'NotFoundError' || err.message.includes('not found')) {
-    message += '❌ Ошибка: NotFoundError\n\n';
-    message += 'Система не видит камеру или микрофон.\n';
-    message += '1. Проверьте, не занято ли устройство другим приложением (Zoom, Skype, Discord).\n';
-    message += '2. Если это MacBook: проверьте, не закрыта ли крышка (для внешней камеры).\n';
-    message += '3. Перезагрузите браузер.';
-  } else if (err.name === 'NotAllowedError' || err.name === 'PermissionDeniedError') {
-    message += '❌ Ошибка: Доступ запрещен.\n\n';
-    message += '1. Нажмите на замок 🔒 в адресной строке и разрешите доступ.\n';
-    message += '2. macOS: Системные настройки → Защита и безопасность → Конфиденциальность → Камера/Микрофон.';
-  } else if (err.name === 'NotReadableError') {
-    message += '❌ Ошибка: Устройство занято.\n\n';
-    message += 'Другая программа монополизировала камеру. Закройте её.';
-  } else {
-    message += `⚠️ ${err.name}: ${err.message}`;
-  }
-  
-  alert(message);
 };
 
 const leaveRoom = () => {
@@ -262,13 +315,12 @@ const leaveRoom = () => {
   socket.value = null;
   roomId.value = null;
   shareLink.value = '';
-  // Очистка UI
+  
   Object.values(peerConnections).forEach(pc => pc.close());
   Object.keys(peerConnections).forEach(key => delete peerConnections[key]);
   Object.keys(remoteStreams).forEach(key => delete remoteStreams[key]);
   Object.keys(peers).forEach(key => delete peers[key]);
   
-  // Сброс URL
   const url = new URL(window.location.href);
   url.searchParams.delete('room');
   window.history.pushState({}, '', url.toString());
@@ -276,31 +328,42 @@ const leaveRoom = () => {
   if (localStream.value) {
     localStream.value.getTracks().forEach(track => track.stop());
   }
-};
-
-// В секцию methods
-const testDevices = async () => {
-  try {
-    // Запрос списка устройств (требует хотя бы разового разрешения)
-    const devices = await navigator.mediaDevices.enumerateDevices();
-    const videoInputs = devices.filter(d => d.kind === 'videoinput');
-    const audioInputs = devices.filter(d => d.kind === 'audioinput');
-    
-    let info = `📹 Видео: ${videoInputs.length}\n🎤 Аудио: ${audioInputs.length}\n\n`;
-    
-    if (videoInputs.length === 0) info += '⚠️ Камеры не найдены системой!\n';
-    if (audioInputs.length === 0) info += '⚠️ Микрофоны не найдены системой!\n';
-    
-    // Пробуем захватить
-    const stream = await navigator.mediaDevices.getUserMedia({ video: true, audio: true });
-    info += '✅ Устройства работают корректно!';
-    stream.getTracks().forEach(t => t.stop());
-    
-    alert(info);
-  } catch (e: any) {
-    alert(`❌ Тест не пройден: ${e.name}\n${e.message}`);
+  if (cameraStream.value) {
+    cameraStream.value.getTracks().forEach(track => track.stop());
   }
 };
+
+const testDevices = async () => {
+  const devices = await checkAvailableDevices();
+  
+  let info = `${deviceInfo.value}\n\n`;
+  
+  // Тест аудио
+  try {
+    const audioStream = await navigator.mediaDevices.getUserMedia({ audio: true });
+    audioStream.getTracks().forEach(t => t.stop());
+    info += '✅ Микрофон работает\n';
+  } catch (e: any) {
+    info += `❌ Микрофон: ${e.name}\n`;
+  }
+  
+  // Тест видео (только если есть камера)
+  if (devices.hasVideo) {
+    try {
+      const videoStream = await navigator.mediaDevices.getUserMedia({ video: true });
+      videoStream.getTracks().forEach(t => t.stop());
+      info += '✅ Камера работает\n';
+    } catch (e: any) {
+      info += `❌ Камера: ${e.name}\n`;
+    }
+  } else {
+    info += '⚠️ Камера не найдена\n';
+  }
+  
+  alert(info);
+};
+
+// --- Socket Listeners ---
 
 const setupSocketListeners = () => {
   if (!socket.value) return;
@@ -312,7 +375,6 @@ const setupSocketListeners = () => {
       if (peerConnections[user.id]) return;
       
       peers[user.id] = { nickname: user.nickname };
-      // Инициатор - тот, у кого ID меньше (детерминировано)
       const isInitiator = myId < user.id;
       createPeerConnection(user.id, isInitiator);
     });
@@ -361,10 +423,13 @@ const setupSocketListeners = () => {
   });
 };
 
+// --- Peer Connection ---
+
 const createPeerConnection = (targetId: string, isInitiator: boolean) => {
   const pc = new RTCPeerConnection(rtcConfig);
   peerConnections[targetId] = pc;
 
+  // 🔥 Добавляем только существующие треки (аудио + видео если есть)
   localStream.value?.getTracks().forEach((track) => {
     pc.addTrack(track, localStream.value!);
   });
@@ -400,8 +465,18 @@ const createPeerConnection = (targetId: string, isInitiator: boolean) => {
 };
 
 // --- Media Controls ---
-const toggleVideo = () => {
+
+// 🔥 Теперь toggleVideo включает камеру если её ещё нет
+const toggleVideo = async () => {
   if (!localStream.value) return;
+  
+  // Если камеры ещё нет — пытаемся включить
+  if (!hasCamera.value) {
+    await enableCamera();
+    return;
+  }
+  
+  // Если камера есть — просто включаем/выключаем трек
   const videoTrack = localStream.value.getVideoTracks()[0];
   if (videoTrack) {
     videoTrack.enabled = !videoTrack.enabled;
@@ -445,16 +520,16 @@ const shareScreen = async () => {
 };
 
 const stopScreenShare = async () => {
-  const streamToRestore = cameraStream.value;
+  const streamToRestore = cameraStream.value || localStream.value;
   if (!streamToRestore) return;
+  
   const camTrack = streamToRestore.getVideoTracks()[0];
-  if (!camTrack) return;
   
   if (localVideoRef.value) localVideoRef.value.srcObject = streamToRestore;
 
   Object.values(peerConnections).forEach(pc => {
     const sender = pc.getSenders().find(s => s.track?.kind === 'video');
-    if (sender) sender.replaceTrack(camTrack);
+    if (sender) sender.replaceTrack(camTrack || null);
   });
 
   localStream.value = streamToRestore;
@@ -467,11 +542,11 @@ onUnmounted(() => {
 </script>
 
 <style>
-/* Стили из оригинального файла + новые */
 .container { font-family: sans-serif; text-align: center; padding: 20px; }
 .login-screen { margin-top: 50px; max-width: 400px; margin-left: auto; margin-right: auto; }
 input { padding: 10px; font-size: 16px; margin: 5px; width: 80%; }
 button { padding: 10px 20px; font-size: 16px; cursor: pointer; margin: 5px; }
+button:disabled { opacity: 0.5; cursor: not-allowed; }
 button.secondary { background: #e0e0e0; border: 1px solid #ccc; }
 button.danger { background: #ffdddd; border: 1px solid #ffaaaa; color: #cc0000; }
 .divider { margin: 20px 0; color: #888; font-style: italic; }
@@ -486,4 +561,6 @@ button.danger { background: #ffdddd; border: 1px solid #ffaaaa; color: #cc0000; 
 .video-card video { width: 100%; height: 100%; object-fit: cover; }
 .label { position: absolute; bottom: 10px; left: 10px; color: white; background: rgba(0,0,0,0.5); padding: 2px 8px; border-radius: 4px; }
 .peers-list { color: #666; }
+.device-info { margin-top: 15px; padding: 10px; background: #e3f2fd; border-radius: 8px; font-size: 14px; }
+.camera-warning { padding: 10px; background: #fff3cd; border: 1px solid #ffc107; border-radius: 8px; color: #856404; }
 </style>
