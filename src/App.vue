@@ -1,11 +1,12 @@
 <template>
   <div class="container">
-    <h1>P2P Video Conference</h1>
+    <h1>Freemax</h1>
 
     <!-- Экран входа -->
     <div v-if="!socket" class="login-screen">
       <input v-model="nickname" placeholder="Введите ваш ник" />
       <button @click="joinRoom">Войти в конференцию</button>
+      <button @click="testMediaAccess">🧪 Тест доступа к медиа</button>
     </div>
 
     <!-- Интерфейс конференции -->
@@ -75,28 +76,73 @@ const peerConnections = reactive<Record<string, RTCPeerConnection>>({});
 const joinRoom = async () => {
   if (!nickname.value) return alert('Введите ник!');
 
+  // 1. Проверка поддержки API браузером
+  if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+    alert('Ваш браузер не поддерживает доступ к камере и микрофону. Пожалуйста, используйте Chrome, Firefox или Safari.');
+    return;
+  }
+
+  // 2. Проверка HTTPS (требуется для работы медиа-API)
+  if (location.protocol !== 'https:' && location.hostname !== 'localhost' && location.hostname !== '127.0.0.1') {
+    alert('Для доступа к камере требуется HTTPS соединение или localhost.');
+    return;
+  }
+
   socket.value = io(import.meta.env.VITE_WS_URL, {
-    transports: ['websocket'], // Принудительно WebSocket, минуя polling
+    transports: ['websocket'],
     reconnection: true,
     reconnectionAttempts: 5,
   });
 
   try {
-    const stream = await navigator.mediaDevices.getUserMedia({ video: true, audio: true });
+    // 3. Явный запрос прав с подробными настройками
+    const stream = await navigator.mediaDevices.getUserMedia({
+      video: {
+        width: { ideal: 1280 },
+        height: { ideal: 720 },
+        facingMode: 'user'
+      },
+      audio: {
+        echoCancellation: true,
+        noiseSuppression: true,
+        autoGainControl: true
+      }
+    });
+
     localStream.value = stream;
-    cameraStream.value = stream; // Сохраняем ссылку на камеру
+    cameraStream.value = stream;
     
     if (localVideoRef.value) {
       localVideoRef.value.srcObject = stream;
     }
-  } catch (err) {
+  } catch (err: any) {
     console.error('Ошибка доступа к медиа:', err);
-    alert('Не удалось получить доступ к камере/микрофону');
+    
+    // 4. Детальная обработка ошибок для macOS
+    if (err.name === 'NotAllowedError' || err.name === 'PermissionDeniedError') {
+      alert('❌ Доступ к камере/микрофону запрещен.\n\nПроверьте:\n1. Настройки сайта в браузере (замок в адресной строке)\n2. Системные настройки macOS: Системные настройки → Защита и безопасность → Конфиденциальность → Камера/Микрофон');
+    } else if (err.name === 'NotFoundError') {
+      alert('❌ Камера или микрофон не найдены. Проверьте подключение устройств.');
+    } else if (err.name === 'NotReadableError') {
+      alert('❌ Устройство занято другим приложением. Закройте другие программы, использующие камеру.');
+    } else {
+      alert('⚠️ Не удалось получить доступ к камере/микрофону: ' + err.message);
+    }
     return;
   }
 
   setupSocketListeners();
   socket.value.emit('join', { nickname: nickname.value });
+};
+
+const testMediaAccess = async () => {
+  try {
+    const stream = await navigator.mediaDevices.getUserMedia({ video: true, audio: true });
+    alert('✅ Доступ разрешен! Камера и микрофон работают.');
+    stream.getTracks().forEach(track => track.stop());
+  } catch (err: any) {
+    alert('❌ Ошибка: ' + err.name + ' - ' + err.message);
+  }
 };
 
 const setupSocketListeners = () => {
