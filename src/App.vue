@@ -130,7 +130,7 @@ const getRtcConfig = () => {
   if (turnConfig.value) {
     config.iceServers!.push({
       // Замените на адрес ВАШЕГО сервера
-      urls: 'turn:ВАШ_IP_СЕРВЕРА:3478', 
+      urls: 'turn:turn.zerocomputer.ru:3478', 
       username: turnConfig.value.username,
       credential: turnConfig.value.password,
     });
